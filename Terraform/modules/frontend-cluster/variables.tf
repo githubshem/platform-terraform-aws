@@ -1,0 +1,12 @@
+variable "environment" {}
+variable "cluster_name" {}
+variable "vpc_id" {}
+variable "private_subnets" {}
+variable "ec2_instance_type" {}
+variable "ami_id" {}
+variable "min_size" {}
+variable "max_size" {}
+variable "warm_pool_size" {}
+variable "target_capacity" {}
+variable "ecs_instance_profile_name" {}
+variable "project_tags" {}

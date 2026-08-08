@@ -1,0 +1,101 @@
+// Terraform State Backup Pipeline
+// Runs on the same Jenkins master EC2 as the RabbitMQ backup job.
+// Daily read-only mirror of BOTH live Terraform state buckets (test and prod)
+// into a dedicated backup bucket. This pipeline NEVER writes to a source bucket, never
+// touches the DynamoDB lock table, and never modifies any backend.tf/state
+// key used by an actual Terraform workspace - it only runs `aws s3 sync`
+// with GetObject/ListBucket on the source and PutObject/ListBucket on the
+// destination, so it cannot interfere with concurrent terraform init/plan/apply.
+//
+// Prerequisites:
+//   1. Destination bucket must exist - apply Terraform/90-ops/state-backup
+//      once (creates a versioned, encrypted, private bucket with lifecycle rules).
+//   2. The Jenkins host's IAM role needs, in addition to whatever it already has:
+//        - s3:GetObject, s3:ListBucket on EACH bucket in SOURCE_BUCKETS (and /*)
+//        - s3:PutObject, s3:ListBucket on DEST_BUCKET (and /*)
+//      (read-only on source, write-only on destination - no delete permissions
+//      needed or granted, since sync never runs with --delete)
+
+pipeline {
+    agent any
+
+    triggers {
+        cron('0 3 * * *')  // Daily 03:00 UTC - offset an hour after the RabbitMQ backup
+    }
+
+    environment {
+        AWS_REGION = 'ap-southeast-1'
+        // Both live state buckets. State is isolated per environment, so backing
+        // up only one silently leaves the other with no copy at all.
+        SOURCE_BUCKETS = 'plat-test-terraform-state plat-prod-terraform-state'
+        DEST_BUCKET    = 'plat-terraform-state-backup'
+        DEST_PREFIX    = 'terraform-state'
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timestamps()
+    }
+
+    stages {
+
+        stage('Verify Buckets') {
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+                    for src in ${SOURCE_BUCKETS}; do
+                        aws s3api head-bucket --bucket "${src}" --region "${AWS_REGION}" || \
+                        { echo "ERROR: source bucket ${src} not found."; exit 1; }
+                    done
+
+                    aws s3api head-bucket --bucket "${DEST_BUCKET}" --region "${AWS_REGION}" || \
+                    { echo "ERROR: destination bucket ${DEST_BUCKET} not found - apply Terraform/90-ops/state-backup first."; exit 1; }
+                '''
+            }
+        }
+
+        stage('Backup Terraform State') {
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+
+                    # Each source keeps its own prefix in the destination, so restoring
+                    # never has to guess which environment an object came from.
+                    for src in ${SOURCE_BUCKETS}; do
+                        echo "[INFO] Syncing s3://${src} -> s3://${DEST_BUCKET}/${DEST_PREFIX}/${src} ..."
+
+                        # Read-only on source, no --delete: objects removed from the
+                        # live state bucket stay in the backup as an archival copy.
+                        aws s3 sync "s3://${src}" "s3://${DEST_BUCKET}/${DEST_PREFIX}/${src}" \
+                          --region "${AWS_REGION}" \
+                          --sse AES256 \
+                          --only-show-errors
+                    done
+
+                    echo "[INFO] Sync complete for: ${SOURCE_BUCKETS}"
+                '''
+            }
+        }
+
+        stage('Verify S3 Output') {
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+                    for src in ${SOURCE_BUCKETS}; do
+                        echo "=== Backup Contents: ${src} ==="
+                        aws s3 ls "s3://${DEST_BUCKET}/${DEST_PREFIX}/${src}/" \
+                          --recursive --human-readable --region "${AWS_REGION}" | tail -10
+                    done
+                '''
+            }
+        }
+    }
+
+    post {
+        success { echo "Terraform state backup completed successfully." }
+        failure  { echo "Terraform state backup FAILED. Check console output above." }
+        always   { cleanWs() }
+    }
+}

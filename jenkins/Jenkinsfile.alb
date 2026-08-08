@@ -1,0 +1,203 @@
+/**
+ * Jenkinsfile.alb
+ *
+ * Jenkins Declarative Pipeline - Terraform ALB
+ *
+ * Supported resource path:
+ *   Terraform/20-platform/alb/{stack}/environments/{env}/
+ *
+ * Stacks: zeus-internal | hera-internal | ui-public | openapi-public
+ *
+ * Apply requires RUN_APPLY=true and approval from a named approver (see APPROVERS).
+ */
+
+def APPROVERS = 'approver1,approver2,approver3'  // Comma-separated Jenkins user IDs
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'GIT_REPO_URL',
+            defaultValue: 'https://git.example.com/example-org/platform-terraform-aws.git',
+            description: 'plat-terraform repository URL'
+        )
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            description: 'Branch to check out'
+        )
+        choice(
+            name: 'ALB_STACK',
+            choices: ['zeus-internal', 'hera-internal', 'ui-public', 'openapi-public'],
+            description: 'ALB stack to plan'
+        )
+        choice(
+            name: 'TERRAFORM_ENV',
+            choices: ['test', 'prod'],
+            description: 'Target environment'
+        )
+        booleanParam(
+            name: 'RUN_APPLY',
+            defaultValue: false,
+            description: 'Tick to enable Policy Check + Approval Gate + Apply'
+        )
+    }
+
+    tools { terraform 'terraform-1.15.5' }
+
+    environment {
+        AWS_CRED_ID = 'AWS_SESSION_TOKEN'
+        GIT_CRED_ID = 'git-grafana'
+    }
+
+    stages {
+
+        stage('Checkout Code') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "${params.GIT_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        url: "${params.GIT_REPO_URL}",
+                        credentialsId: "${env.GIT_CRED_ID}"
+                    ]]
+                ])
+            }
+        }
+
+        stage('Resolve Terraform Path') {
+            steps {
+                script {
+                    def allowedStacks = ['zeus-internal', 'hera-internal', 'ui-public', 'openapi-public']
+                    if (!(params.ALB_STACK in allowedStacks)) {
+                        error("Invalid ALB_STACK '${params.ALB_STACK}'. Allowed: ${allowedStacks.join(', ')}")
+                    }
+
+                    def allowedEnvs = ['test', 'prod']
+                    if (!(params.TERRAFORM_ENV in allowedEnvs)) {
+                        error("Invalid TERRAFORM_ENV '${params.TERRAFORM_ENV}'. Allowed: ${allowedEnvs.join(', ')}")
+                    }
+
+                    env.BASE_PATH = [
+                        "Terraform/20-platform/alb",
+                        params.ALB_STACK,
+                        "environments",
+                        params.TERRAFORM_ENV
+                    ].join('/')
+
+                    echo "Resolved BASE_PATH: ${env.BASE_PATH}"
+                }
+            }
+        }
+
+        stage('Quality Gates (pre-init)') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.runQualityGatesPreInit(env.BASE_PATH)
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Quality Gates (post-init)') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+            post {
+                always {
+                    script {
+                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        tf.archivePlanArtifacts(env.BASE_PATH)
+                    }
+                }
+            }
+        }
+
+        stage('Policy Check') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    env.DESTRUCTIVE_ACTIONS = tf.policyCheck(env.BASE_PATH).join('\n')
+                }
+            }
+        }
+
+        stage('Approval Gate') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def policyNote = env.DESTRUCTIVE_ACTIONS?.trim() ?
+                        "\n⚠️  DESTRUCTIVE ACTIONS IN PLAN:\n${env.DESTRUCTIVE_ACTIONS}" : ''
+                    tf.approvalGate(
+                        "Review the ALB plan for ${params.ALB_STACK} (env: ${params.TERRAFORM_ENV}).${policyNote}\n" +
+                        "Check plan_summary.txt artifact before approving.",
+                        30,
+                        APPROVERS
+                    )
+                }
+            }
+        }
+
+        stage('State Snapshot') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo "✅ ALB pipeline completed for ${params.ALB_STACK} (${params.TERRAFORM_ENV})"
+        }
+        failure {
+            echo "❌ ALB pipeline failed for ${params.ALB_STACK} (${params.TERRAFORM_ENV})"
+        }
+        aborted {
+            echo "⏹ ALB pipeline aborted - Apply was not executed."
+        }
+    }
+}

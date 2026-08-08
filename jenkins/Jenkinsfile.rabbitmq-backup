@@ -1,0 +1,167 @@
+// RabbitMQ S3 Backup Pipeline
+// Runs on a Jenkins EC2 agent with an instance role granting S3 write access.
+// Backs up RabbitMQ definitions (queues, exchanges, bindings, vhosts) to S3 daily.
+//
+// Prerequisites:
+//   1. Jenkins credentials store: a RabbitMQ management admin user stored as
+//      'rmq-zeus-admin' (username/password type). The account needs the
+//      [administrator, management] tags to read /api/definitions.
+//   2. hera is an Amazon MQ broker reachable only from inside the VPC. The
+//      Backup hera stage self-detects reachability at runtime (a TCP probe to
+//      port 15671) rather than taking it as a parameter, so the same pipeline
+//      works whether the build is cron-triggered or manual and regardless of
+//      which agent picks it up. It starts succeeding automatically once the
+//      agent has VPC routing and the broker's security group allows it.
+//   3. zeus is a self-hosted RabbitMQ on ECS. Its management API is fronted by
+//      a public ALB on port 15672, so it needs no VPC peering. Point ZEUS_HOST
+//      at that listener, not at any other load balancer in the account.
+//   4. The S3 bucket named in S3_BUCKET must exist before the first run.
+
+pipeline {
+    agent any
+
+    triggers {
+        cron('0 2 * * *')  // Daily 02:00 UTC
+    }
+
+    environment {
+        AWS_REGION     = 'ap-southeast-1'
+        S3_BUCKET      = 'plat-prod-rabbitmq-definitions-backup'
+        S3_PREFIX      = 'rabbitmq-definitions'
+
+        // Self-hosted zeus RabbitMQ (ECS) - management API via a public ALB
+        // listener on port 15672, so no VPC peering is required.
+        ZEUS_HOST   = 'http://lb.example.com:15672'
+        ZEUS_NAME   = 'zeus-rabbitmq'
+
+        // Amazon MQ hera broker (prod) - reachability self-detected per-run
+        HERA_ENDPOINT = 'b-00000000-0000-0000-0000-000000000004.mq.ap-southeast-1.on.aws'
+        HERA_NAME     = 'plat-hera-mq-prod'
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timestamps()
+    }
+
+    stages {
+
+        stage('Verify S3 Bucket') {
+            steps {
+                sh '''
+                    aws s3api head-bucket \
+                      --bucket "${S3_BUCKET}" \
+                      --region "${AWS_REGION}" || \
+                    (echo "ERROR: S3 bucket ${S3_BUCKET} not found." && exit 1)
+                '''
+            }
+        }
+
+        stage('Backup zeus (self-hosted ECS)') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'rmq-zeus-admin',
+                    usernameVariable: 'RMQ_USER',
+                    passwordVariable: 'RMQ_PASS'
+                )]) {
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        TS="$(date -u +%Y/%m/%d)"
+                        STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                        TMP="$(mktemp)"
+                        trap 'rm -f "$TMP"' EXIT
+
+                        echo "[INFO] Exporting zeus definitions from ${ZEUS_HOST}/api/definitions ..."
+                        HTTP=$(curl -sS -o "$TMP" -w '%{http_code}' \
+                          --max-time 60 --connect-timeout 10 \
+                          -u "${RMQ_USER}:${RMQ_PASS}" \
+                          -H "Accept: application/json" \
+                          "${ZEUS_HOST}/api/definitions")
+
+                        if [ "$HTTP" != "200" ]; then
+                          echo "ERROR: /api/definitions returned HTTP $HTTP"; cat "$TMP"; exit 1
+                        fi
+
+                        jq empty "$TMP"
+
+                        DEST="s3://${S3_BUCKET}/${S3_PREFIX}/${ZEUS_NAME}/${TS}/definitions-${STAMP}.json"
+                        LATEST="s3://${S3_BUCKET}/${S3_PREFIX}/${ZEUS_NAME}/latest/definitions.json"
+
+                        aws s3 cp "$TMP" "$DEST"   --region "${AWS_REGION}" --sse AES256
+                        aws s3 cp "$TMP" "$LATEST" --region "${AWS_REGION}" --sse AES256
+                        echo "[INFO] zeus backup complete: $DEST"
+                    '''
+                }
+            }
+        }
+
+        stage('Backup hera (Amazon MQ)') {
+            // hera lives in vpc-0aaa111bbb222ccc (prod VPC). Live TCP probe
+            // instead of a static flag - skips cleanly if this agent can't reach
+            // it (wrong VPC, or the broker's security group does not yet allow it),
+            // and runs automatically the moment it can.
+            when {
+                expression {
+                    return sh(
+                        script: "timeout 5 bash -c 'echo > /dev/tcp/${env.HERA_ENDPOINT}/15671'",
+                        returnStatus: true
+                    ) == 0
+                }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'rmq-hera-prod',
+                    usernameVariable: 'RMQ_USER',
+                    passwordVariable: 'RMQ_PASS'
+                )]) {
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        TS="$(date -u +%Y/%m/%d)"
+                        STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                        TMP="$(mktemp)"
+                        trap 'rm -f "$TMP"' EXIT
+
+                        HERA_URL="https://${HERA_ENDPOINT}:15671"
+                        echo "[INFO] Exporting hera definitions from ${HERA_URL}/api/definitions ..."
+                        HTTP=$(curl -sS -o "$TMP" -w '%{http_code}' \
+                          --max-time 60 --connect-timeout 10 \
+                          -u "${RMQ_USER}:${RMQ_PASS}" \
+                          -H "Accept: application/json" \
+                          "${HERA_URL}/api/definitions")
+
+                        if [ "$HTTP" != "200" ]; then
+                          echo "ERROR: /api/definitions returned HTTP $HTTP"; cat "$TMP"; exit 1
+                        fi
+
+                        jq empty "$TMP"
+
+                        DEST="s3://${S3_BUCKET}/${S3_PREFIX}/${HERA_NAME}/${TS}/definitions-${STAMP}.json"
+                        LATEST="s3://${S3_BUCKET}/${S3_PREFIX}/${HERA_NAME}/latest/definitions.json"
+
+                        aws s3 cp "$TMP" "$DEST"   --region "${AWS_REGION}" --sse AES256
+                        aws s3 cp "$TMP" "$LATEST" --region "${AWS_REGION}" --sse AES256
+                        echo "[INFO] hera backup complete: $DEST"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify S3 Output') {
+            steps {
+                sh '''
+                    echo "=== Backup Contents in S3 ==="
+                    aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" \
+                      --recursive --human-readable --region "${AWS_REGION}"
+                '''
+            }
+        }
+    }
+
+    post {
+        success { echo "RabbitMQ backup completed successfully." }
+        failure  { echo "RabbitMQ backup FAILED. Check console output above." }
+        always   { cleanWs() }
+    }
+}

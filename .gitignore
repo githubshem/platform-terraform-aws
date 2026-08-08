@@ -1,0 +1,21 @@
+# Ignore a specific file
+secrets.txt
+
+# Terraform local state and plugin cache (do NOT ignore .terraform.lock.hcl)
+.terraform/
+*.tfstate*
+*.tfstate.backup
+
+# Ignore a whole directory (folders must end with /)
+.cursor/
+node_modules/
+bin/
+.tools/
+
+# Ignore all files with a specific extension
+*.log
+*.exe
+
+# Ignore everything in a folder EXCEPT one file
+temp/*
+!.gitkeep

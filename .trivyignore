@@ -1,0 +1,25 @@
+# Accepted Trivy findings: add entries here with justification when a finding cannot be remediated immediately. Format: CVE-ID or check ID per Trivy docs.
+
+# The check ID below are approved for testing purposes
+# PLEASE REVIEW: Revisit when least-privilege egress CIDRs/ports are defined.
+
+# VPC Security Groups
+# AWS-0104 (CRITICAL): Security group rule allows unrestricted egress to any IP address.
+
+# VPC VPC
+# AWS-0164 (HIGH): Subnet associates public IP address.
+
+# ALB
+# AWS-0052 (HIGH): Application load balancer is not set to drop invalid headers. (occuring on both ALB_STACK='zeus-internal' & ALB_STACK='hera-internal' )
+# AWS-0047 (CRITICAL): Listener uses an outdated TLS policy. (occuring on ALB_STACK='ui-public' only)
+# AWS-0053 (HIGH): Load balancer is exposed publicly. (occuring on ALB_STACK='ui-public' only)
+
+# Redis
+# AWS-0045 (HIGH): Replication group does not have at-rest encryption enabled. (occuring on CLUSTER_NAME='selene' only)
+# AWS-0051 (HIGH): Replication group does not have transit encryption enabled. (occuring on CLUSTER_NAME='selene' only)
+
+# RDS
+# AWS-0079 (HIGH): Cluster does not specify a customer managed key for storage encryption. (occuring on all CLUSTER_NAME='athena', 'horae', 'gaia' & 'persephone')
+
+# ECS
+# AWS-0130 (HIGH): Launch template does not require IMDS access to require a token

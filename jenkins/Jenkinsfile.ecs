@@ -1,0 +1,208 @@
+/**
+ * Jenkinsfile.ecs
+ *
+ * Jenkins Declarative Pipeline - Terraform ECS
+ *
+ * Supported resource path:
+ *   Terraform/30-workloads/{app}-services/environments/{env}/{app}/{service}/
+ *
+ * Canonical pipeline - use Script Path: jenkins/Jenkinsfile.ecs
+ *
+ * Parameters: ALL must be configured in the Jenkins job UI (Configure → This project
+ * is parameterised). Do NOT add a parameters {} block to this Jenkinsfile - Jenkins
+ * re-syncs Jenkinsfile parameters on every run and overwrites Active Choices UI
+ * settings (APP_NAME, SERVICE_NAME) back to plain String parameters.
+ *
+ * Required UI parameters:
+ *   GIT_REPO_URL   → String
+ *   GIT_BRANCH     → String
+ *   TERRAFORM_ENV  → Choice: test, prod
+ *   RUN_APPLY      → Boolean
+ *   APP_NAME       → Active Choices: zeus, hera
+ *   SERVICE_NAME   → Active Choices Reactive (depends on APP_NAME)
+ *
+ * See jenkins/README.md section 5.1 for setup scripts and defaults.
+ */
+
+pipeline {
+    agent any
+
+    tools { terraform 'terraform-1.15.5' }
+
+    environment {
+        AWS_CRED_ID = 'AWS_SESSION_TOKEN'
+        GIT_CRED_ID = 'git-grafana'
+    }
+
+    stages {
+
+        stage('Checkout Code') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "${params.GIT_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        url: "${params.GIT_REPO_URL}",
+                        credentialsId: "${env.GIT_CRED_ID}"
+                    ]]
+                ])
+            }
+        }
+
+        stage('Resolve Terraform Path') {
+            steps {
+                script {
+                    def allowedEnvs = ['test', 'prod']
+                    if (!(params.TERRAFORM_ENV in allowedEnvs)) {
+                        error("Invalid TERRAFORM_ENV '${params.TERRAFORM_ENV}'. Allowed: ${allowedEnvs.join(', ')}")
+                    }
+
+                    def allowedApps = ['zeus', 'hera']
+                    if (!(params.APP_NAME in allowedApps)) {
+                        error("Invalid APP_NAME '${params.APP_NAME}'. Allowed: ${allowedApps.join(', ')}")
+                    }
+
+                    def selectedService = params.SERVICE_NAME?.trim()
+                    if (!selectedService) {
+                        error("SERVICE_NAME is required.")
+                    }
+
+                    def servicesByApp = [
+                        zeus: [
+                            'hermes', 'apollo', 'ares', 'zeus', 'artemis', 'hestia', 'demeter',
+                            'hades', 'hephaestus', 'hecate', 'helios', 'iris',
+                            'triton', 'nereus', 'proteus', 'arachne', 'kronos', 'rhea',
+                            'morpheus', 'orion'
+                        ],
+                        hera: [
+                            'metis', 'themis', 'plutus', 'atlas',
+                            'moirai', 'mnemosyne', 'notus'
+                        ]
+                    ]
+
+                    def allowedServices = servicesByApp[params.APP_NAME]
+                    if (!(selectedService in allowedServices)) {
+                        error("Invalid SERVICE_NAME '${selectedService}' for APP_NAME='${params.APP_NAME}'. Allowed: ${allowedServices.join(', ')}")
+                    }
+
+                    env.BASE_PATH = [
+                        "Terraform/30-workloads",
+                        "${params.APP_NAME}-services",
+                        "environments",
+                        params.TERRAFORM_ENV,
+                        params.APP_NAME,
+                        selectedService
+                    ].join('/')
+
+                    echo "Resolved BASE_PATH: ${env.BASE_PATH}"
+                }
+            }
+        }
+
+        stage('Quality Gates (pre-init)') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.runQualityGatesPreInit(env.BASE_PATH)
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Quality Gates (post-init)') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+            post {
+                always {
+                    script {
+                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        tf.archivePlanArtifacts(env.BASE_PATH)
+                    }
+                }
+            }
+        }
+
+        stage('Policy Check') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.policyCheck(env.BASE_PATH)
+                }
+            }
+        }
+
+        stage('Approval Gate') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.approvalGate(
+                        "Review the ECS plan for ${params.APP_NAME}/${params.SERVICE_NAME} " +
+                        "(env: ${params.TERRAFORM_ENV}). Proceed with Apply?",
+                        30
+                    )
+                }
+            }
+        }
+
+        stage('State Snapshot') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo "✅ Pipeline completed successfully for ${params.APP_NAME}/${params.SERVICE_NAME} (${params.TERRAFORM_ENV})"
+        }
+        failure {
+            echo "❌ Pipeline failed for ${params.APP_NAME}/${params.SERVICE_NAME} (${params.TERRAFORM_ENV})"
+        }
+        aborted {
+            echo "⏹ Pipeline aborted - Apply was not executed."
+        }
+    }
+}

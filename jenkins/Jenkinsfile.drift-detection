@@ -1,0 +1,231 @@
+/**
+ * Jenkinsfile.drift-detection
+ *
+ * Scheduled plan-only drift detection for critical Terraform stacks.
+ * Classifies each stack as: NO DRIFT | DRIFT DETECTED | PLAN FAILED | PROVIDER/BACKEND ISSUE
+ *
+ * Jenkins job setup:
+ *   Script Path: jenkins/Jenkinsfile.drift-detection
+ *   Build Triggers: cron is defined in-pipeline (daily off-hours)
+ */
+
+// The matrix is discovered from the repo rather than hand-listed. The previous
+// hardcoded list had fallen 58 workspaces behind -- every ECS service and
+// frontend was silently unmonitored, which is where config drifts most, since
+// image tags and task definitions change on every deploy.
+//
+// Anything with a backend.tf is a deployable workspace and is in scope unless
+// it matches an exclusion below.
+def discoverStacks() {
+    // Declared inside the method on purpose: a script-level `def` in a
+    // Jenkinsfile is a local of the run method, not a field, so a method like
+    // this one cannot see it.
+    def excludedPrefixes = [
+        // Applying these through the Jenkins they manage can kill the build
+        // mid-apply, and they are deployed out-of-band. See root README Section 4.
+        'Terraform/90-ops/',
+    ]
+
+    // Suffix-matched exclusions, for workspaces this agent cannot reach at all.
+    def excludedSuffixes = [
+        // The OpenSearch ism/ workspaces talk to the domain through the
+        // opensearch provider, and the domain has no public endpoint. From an
+        // agent outside the VPC every run would time out and report a false
+        // PROVIDER/BACKEND ISSUE, training people to ignore the report. The
+        // domain stack itself stays in scope: it only calls the AWS API.
+        '/ism',
+    ]
+
+    def out = sh(
+        script: "find Terraform -name backend.tf -printf '%h\\n' | sort",
+        returnStdout: true
+    ).trim()
+
+    if (!out) {
+        error('Drift matrix discovery found no workspaces -- expected at least one backend.tf')
+    }
+
+    return out.split('\n').collect { it.trim() }.findAll { path ->
+        path &&
+            !excludedPrefixes.any { path.startsWith(it) } &&
+            !excludedSuffixes.any { path.endsWith(it) }
+    }.collect { path ->
+        // Terraform/30-workloads/zeus-services/environments/prod/zeus/apollo
+        //   -> 30-workloads/zeus-services/prod/zeus/apollo
+        def label = path.replaceFirst('^Terraform/', '').replaceFirst('/environments/', '/')
+        [path: path, label: label]
+    }
+}
+
+pipeline {
+    agent any
+
+    triggers {
+        cron('H 2 * * *')
+    }
+
+    parameters {
+        string(
+            name: 'GIT_REPO_URL',
+            defaultValue: 'https://git.example.com/example-org/platform-terraform-aws.git',
+            description: 'plat-terraform repository URL'
+        )
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            description: 'Branch to check out'
+        )
+    }
+
+    tools { terraform 'terraform-1.15.5' }
+
+    environment {
+        AWS_CRED_ID = 'AWS_SESSION_TOKEN'
+        GIT_CRED_ID = 'git-grafana'
+    }
+
+    options {
+        // 92 workspaces across 6 lanes, up from 32 run sequentially.
+        timeout(time: 180, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timestamps()
+    }
+
+    stages {
+
+        stage('Checkout Code') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "${params.GIT_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        url: "${params.GIT_REPO_URL}",
+                        credentialsId: "${env.GIT_CRED_ID}"
+                    ]]
+                ])
+            }
+        }
+
+        stage('Drift Detection') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def stacks = discoverStacks()
+                    echo "Drift matrix: ${stacks.size()} workspaces discovered"
+
+                    // Each workspace plans in its own directory with its own
+                    // .terraform, so lanes do not contend. Bounded rather than
+                    // fully parallel to avoid hammering the AWS API and the
+                    // provider registry from ~90 concurrent inits.
+                    def LANES = 6
+                    def results = java.util.Collections.synchronizedList([])
+
+                    def planOne = { stack ->
+                        def basePath = stack.path
+                        def label = stack.label
+
+                        if (!fileExists(basePath)) {
+                            results << [label: label, status: 'PLAN FAILED', note: 'workspace missing']
+                            return
+                        }
+
+                        try {
+                            tf.tfInit(basePath, env.AWS_CRED_ID)
+                        } catch (Exception e) {
+                            results << [label: label, status: 'PROVIDER/BACKEND ISSUE', note: '']
+                            echo "Init failed for ${label}: ${e.message}"
+                            return
+                        }
+
+                        try {
+                            def exitCode = tf.tfPlanDetailed(basePath, env.AWS_CRED_ID)
+                            switch (exitCode) {
+                                case 0:
+                                    results << [label: label, status: 'NO DRIFT', note: '']
+                                    break
+                                case 2:
+                                    results << [label: label, status: 'DRIFT DETECTED', note: '']
+                                    break
+                                default:
+                                    results << [label: label, status: 'PLAN FAILED', note: "exit ${exitCode}"]
+                                    break
+                            }
+                        } catch (Exception e) {
+                            results << [label: label, status: 'PLAN FAILED', note: '']
+                            echo "Plan failed for ${label}: ${e.message}"
+                        }
+                    }
+
+                    // Deal workspaces round-robin so one slow category does not
+                    // land entirely in a single lane.
+                    def branches = [:]
+                    for (int lane = 0; lane < LANES; lane++) {
+                        def mine = []
+                        for (int i = lane; i < stacks.size(); i += LANES) {
+                            mine.add(stacks[i])
+                        }
+                        if (mine) {
+                            branches["lane-${lane}"] = { mine.each { planOne(it) } }
+                        }
+                    }
+                    parallel branches
+
+                    // Copy out before sorting: results is a synchronized list and
+                    // sort(Closure) mutates in place.
+                    def sorted = new ArrayList(results).sort { it.label }
+                    def driftCount   = sorted.count { it.status == 'DRIFT DETECTED' }
+                    def failCount    = sorted.count { it.status == 'PLAN FAILED' }
+                    def backendCount = sorted.count { it.status == 'PROVIDER/BACKEND ISSUE' }
+
+                    def reportLines = []
+                    reportLines << "Terraform Drift Detection Report"
+                    reportLines << "Build: ${env.BUILD_NUMBER}  Branch: ${params.GIT_BRANCH}"
+                    reportLines << "Timestamp: ${new Date()}"
+                    reportLines << "Workspaces checked: ${sorted.size()}"
+                    reportLines << ""
+                    reportLines << String.format('%-55s %s', 'STACK', 'STATUS')
+                    reportLines << '-' * 80
+
+                    sorted.each { r ->
+                        def line = String.format('%-55s %s', r.label, r.status)
+                        reportLines << (r.note ? "${line} (${r.note})" : line)
+                    }
+
+                    reportLines << ''
+                    reportLines << "Summary: ${driftCount} drift, ${failCount} plan failures, ${backendCount} backend/provider issues"
+
+                    def report = reportLines.join('\n')
+                    writeFile file: 'drift_report.txt', text: report
+                    echo report
+
+                    env.DRIFT_COUNT = "${driftCount}"
+                    env.FAIL_COUNT = "${failCount}"
+                    env.BACKEND_COUNT = "${backendCount}"
+
+                    if (failCount > 0 || backendCount > 0) {
+                        error("Drift detection: ${failCount} plan failure(s), ${backendCount} backend/provider issue(s)")
+                    } else if (driftCount > 0) {
+                        unstable("Drift detected in ${driftCount} stack(s) - see drift_report.txt")
+                    }
+                }
+            }
+        }
+
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'drift_report.txt', allowEmptyArchive: true
+        }
+        success {
+            echo "✅ No drift detected across all stacks"
+        }
+        unstable {
+            echo "⚠️  Drift detection completed with drift - review drift_report.txt"
+        }
+        failure {
+            echo "❌ Drift detection job failed - review drift_report.txt"
+        }
+    }
+}

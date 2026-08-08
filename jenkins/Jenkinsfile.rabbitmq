@@ -1,0 +1,186 @@
+/**
+ * Jenkinsfile.rabbitmq
+ *
+ * Jenkins Declarative Pipeline - Terraform RabbitMQ
+ *
+ * Supported resource path:
+ *   Terraform/10-data/rabbitmq/environments/{env}/
+ *
+ * Available environments: test | prod
+ */
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'GIT_REPO_URL',
+            defaultValue: 'https://git.example.com/example-org/platform-terraform-aws.git',
+            description: 'plat-terraform repository URL'
+        )
+        string(
+            name: 'GIT_BRANCH',
+            defaultValue: 'main',
+            description: 'Branch to check out'
+        )
+        choice(
+            name: 'TERRAFORM_ENV',
+            choices: ['test', 'prod'],
+            description: 'RabbitMQ environment target'
+        )
+        booleanParam(
+            name: 'RUN_APPLY',
+            defaultValue: false,
+            description: 'Tick to enable Approval Gate + Apply (leave unticked for plan-only runs)'
+        )
+    }
+
+    tools { terraform 'terraform-1.15.5' }
+
+    environment {
+        AWS_CRED_ID = 'AWS_SESSION_TOKEN'
+        GIT_CRED_ID = 'git-grafana'
+    }
+
+    stages {
+
+        stage('Checkout Code') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "${params.GIT_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        url: "${params.GIT_REPO_URL}",
+                        credentialsId: "${env.GIT_CRED_ID}"
+                    ]]
+                ])
+            }
+        }
+
+        stage('Resolve Terraform Path') {
+            steps {
+                script {
+                    def allowedEnvs = ['test', 'prod']
+                    if (!(params.TERRAFORM_ENV in allowedEnvs)) {
+                        error("Invalid TERRAFORM_ENV '${params.TERRAFORM_ENV}'. Allowed: ${allowedEnvs.join(', ')}")
+                    }
+
+                    env.BASE_PATH = [
+                        "Terraform/10-data/rabbitmq/environments",
+                        params.TERRAFORM_ENV
+                    ].join('/')
+
+                    echo "Resolved BASE_PATH: ${env.BASE_PATH}"
+                }
+            }
+        }
+
+        stage('Quality Gates (pre-init)') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.runQualityGatesPreInit(env.BASE_PATH)
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Quality Gates (post-init)') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+            post {
+                always {
+                    script {
+                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        tf.archivePlanArtifacts(env.BASE_PATH)
+                    }
+                }
+            }
+        }
+
+        stage('Policy Check') {
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.policyCheck(env.BASE_PATH)
+                }
+            }
+        }
+
+        stage('Approval Gate') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def timeoutMinutes = (params.TERRAFORM_ENV == 'prod') ? 15 : 30
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.approvalGate(
+                        "Review the RabbitMQ plan for environment '${params.TERRAFORM_ENV}'.\n" +
+                        "Check plan_summary.txt before approving.\n" +
+                        (params.TERRAFORM_ENV == 'prod' ? '⚠️  Production environment - auto-abort in 15 min.' : ''),
+                        timeoutMinutes
+                    )
+                }
+            }
+        }
+
+        stage('State Snapshot') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                expression { return params.RUN_APPLY == true }
+            }
+            steps {
+                script {
+                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
+                }
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo "✅ RabbitMQ pipeline completed for environment '${params.TERRAFORM_ENV}'"
+        }
+        failure {
+            echo "❌ RabbitMQ pipeline failed for environment '${params.TERRAFORM_ENV}'"
+        }
+        aborted {
+            echo "⏹ RabbitMQ pipeline aborted - Apply was not executed."
+        }
+    }
+}

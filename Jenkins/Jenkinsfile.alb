@@ -1,20 +1,14 @@
 /**
- * Jenkinsfile.eks
+ * Jenkinsfile.alb
  *
- * Jenkins Declarative Pipeline - EKS control planes and managed node groups
+ * Jenkins Declarative Pipeline - Terraform ALB
  *
  * Supported resource path:
- *   Terraform/20-platform/eks/environments/{env}/{app}/
+ *   Terraform/20-platform/alb/{stack}/environments/{env}/
  *
- * Apps: zeus | hera
+ * Stacks: zeus-internal | hera-internal | ui-public | openapi-public
  *
- * Named approvers, like VPC and ALB: this stack owns the control plane and the
- * node IAM role, so a bad apply takes every workload on the cluster with it.
- *
- * Scope note: this pipeline manages the cluster, not what runs on it. It talks
- * only to the AWS API, so it works from any agent. Anything using the kubernetes
- * or helm provider must run from inside the VPC, because the API endpoint is
- * private.
+ * Apply requires RUN_APPLY=true and approval from a named approver (see APPROVERS).
  */
 
 def APPROVERS = 'approver1,approver2,approver3'  // Comma-separated Jenkins user IDs
@@ -34,9 +28,9 @@ pipeline {
             description: 'Branch to check out'
         )
         choice(
-            name: 'EKS_APP',
-            choices: ['zeus', 'hera'],
-            description: 'Application family whose cluster to plan'
+            name: 'ALB_STACK',
+            choices: ['zeus-internal', 'hera-internal', 'ui-public', 'openapi-public'],
+            description: 'ALB stack to plan'
         )
         choice(
             name: 'TERRAFORM_ENV',
@@ -75,9 +69,9 @@ pipeline {
         stage('Resolve Terraform Path') {
             steps {
                 script {
-                    def allowedApps = ['zeus', 'hera']
-                    if (!(params.EKS_APP in allowedApps)) {
-                        error("Invalid EKS_APP '${params.EKS_APP}'. Allowed: ${allowedApps.join(', ')}")
+                    def allowedStacks = ['zeus-internal', 'hera-internal', 'ui-public', 'openapi-public']
+                    if (!(params.ALB_STACK in allowedStacks)) {
+                        error("Invalid ALB_STACK '${params.ALB_STACK}'. Allowed: ${allowedStacks.join(', ')}")
                     }
 
                     def allowedEnvs = ['test', 'prod']
@@ -86,9 +80,10 @@ pipeline {
                     }
 
                     env.BASE_PATH = [
-                        "Terraform/20-platform/eks/environments",
-                        params.TERRAFORM_ENV,
-                        params.EKS_APP
+                        "Terraform/20-platform/alb",
+                        params.ALB_STACK,
+                        "environments",
+                        params.TERRAFORM_ENV
                     ].join('/')
 
                     echo "Resolved BASE_PATH: ${env.BASE_PATH}"
@@ -99,7 +94,7 @@ pipeline {
         stage('Quality Gates (pre-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPreInit(env.BASE_PATH)
                 }
             }
@@ -108,7 +103,7 @@ pipeline {
         stage('Terraform Init') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -117,7 +112,7 @@ pipeline {
         stage('Quality Gates (post-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -126,14 +121,14 @@ pipeline {
         stage('Terraform Plan') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
             post {
                 always {
                     script {
-                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        def tf = load 'Jenkins/shared/terraform_common.groovy'
                         tf.archivePlanArtifacts(env.BASE_PATH)
                     }
                 }
@@ -143,7 +138,7 @@ pipeline {
         stage('Policy Check') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     env.DESTRUCTIVE_ACTIONS = tf.policyCheck(env.BASE_PATH).join('\n')
                 }
             }
@@ -155,11 +150,11 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     def policyNote = env.DESTRUCTIVE_ACTIONS?.trim() ?
                         "\n⚠️  DESTRUCTIVE ACTIONS IN PLAN:\n${env.DESTRUCTIVE_ACTIONS}" : ''
                     tf.approvalGate(
-                        "Review the VPC plan for ${params.VPC_STACK} (env: ${params.TERRAFORM_ENV}).${policyNote}\n" +
+                        "Review the ALB plan for ${params.ALB_STACK} (env: ${params.TERRAFORM_ENV}).${policyNote}\n" +
                         "Check plan_summary.txt artifact before approving.",
                         30,
                         APPROVERS
@@ -174,7 +169,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
                 }
             }
@@ -186,7 +181,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -196,13 +191,13 @@ pipeline {
 
     post {
         success {
-            echo "✅ VPC pipeline completed for ${params.VPC_STACK} (${params.TERRAFORM_ENV})"
+            echo "✅ ALB pipeline completed for ${params.ALB_STACK} (${params.TERRAFORM_ENV})"
         }
         failure {
-            echo "❌ VPC pipeline failed for ${params.VPC_STACK} (${params.TERRAFORM_ENV})"
+            echo "❌ ALB pipeline failed for ${params.ALB_STACK} (${params.TERRAFORM_ENV})"
         }
         aborted {
-            echo "⏹ VPC pipeline aborted - Apply was not executed."
+            echo "⏹ ALB pipeline aborted - Apply was not executed."
         }
     }
 }

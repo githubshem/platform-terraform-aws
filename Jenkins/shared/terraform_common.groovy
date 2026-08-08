@@ -2,7 +2,7 @@
  * terraform_common.groovy
  *
  * Reusable Terraform pipeline helpers - loaded into each Jenkinsfile via:
- *   def tf = load 'jenkins/shared/terraform_common.groovy'
+ *   def tf = load 'Jenkins/shared/terraform_common.groovy'
  *
  * Requirements:
  *   - Jenkins credentials ID for AWS: 'AWS_SESSION_TOKEN'

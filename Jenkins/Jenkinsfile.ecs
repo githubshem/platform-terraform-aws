@@ -6,7 +6,7 @@
  * Supported resource path:
  *   Terraform/30-workloads/{app}-services/environments/{env}/{app}/{service}/
  *
- * Canonical pipeline - use Script Path: jenkins/Jenkinsfile.ecs
+ * Canonical pipeline - use Script Path: Jenkins/Jenkinsfile.ecs
  *
  * Parameters: ALL must be configured in the Jenkins job UI (Configure → This project
  * is parameterised). Do NOT add a parameters {} block to this Jenkinsfile - Jenkins
@@ -21,7 +21,7 @@
  *   APP_NAME       → Active Choices: zeus, hera
  *   SERVICE_NAME   → Active Choices Reactive (depends on APP_NAME)
  *
- * See jenkins/README.md section 5.1 for setup scripts and defaults.
+ * See Jenkins/README.md section 5.1 for setup scripts and defaults.
  */
 
 pipeline {
@@ -102,7 +102,7 @@ pipeline {
         stage('Quality Gates (pre-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPreInit(env.BASE_PATH)
                 }
             }
@@ -111,7 +111,7 @@ pipeline {
         stage('Terraform Init') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -120,7 +120,7 @@ pipeline {
         stage('Quality Gates (post-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -129,14 +129,14 @@ pipeline {
         stage('Terraform Plan') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
             post {
                 always {
                     script {
-                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        def tf = load 'Jenkins/shared/terraform_common.groovy'
                         tf.archivePlanArtifacts(env.BASE_PATH)
                     }
                 }
@@ -146,7 +146,7 @@ pipeline {
         stage('Policy Check') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.policyCheck(env.BASE_PATH)
                 }
             }
@@ -158,7 +158,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.approvalGate(
                         "Review the ECS plan for ${params.APP_NAME}/${params.SERVICE_NAME} " +
                         "(env: ${params.TERRAFORM_ENV}). Proceed with Apply?",
@@ -174,7 +174,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
                 }
             }
@@ -186,7 +186,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }

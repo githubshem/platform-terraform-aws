@@ -5,7 +5,7 @@
 > backlog, see the authoritative repo-root [`../README.md`](../README.md).
 
 > **Where files live:** All Jenkinsfiles and the shared helper are stored **inside this GitLab
-> repository** (`plat-terraform`) under the `jenkins/` folder.
+> repository** (`plat-terraform`) under the `Jenkins/` folder.
 > Jenkins reads them directly from GitLab; you never paste pipeline code into the Jenkins UI.
 
 ---
@@ -14,7 +14,7 @@
 
 ```
 plat-terraform/
-└── jenkins/
+└── Jenkins/
     ├── shared/
     │   └── terraform_common.groovy   ← Reusable helper loaded by every pipeline
     ├── Jenkinsfile.ecs               ← Pipeline for ECS service deployments
@@ -29,7 +29,7 @@ plat-terraform/
     └── README.md                     ← This file
 ```
 
-**ECS canonical path:** `jenkins/Jenkinsfile.ecs`. Do **not** use the retired
+**ECS canonical path:** `Jenkins/Jenkinsfile.ecs`. Do **not** use the retired
 in-tree `Terraform/ECS/pipelines/` path, which was removed with the restructure.
 
 **Rule:** Every change to pipeline logic is a GitLab merge request (full history, reviews,
@@ -68,7 +68,7 @@ The drift-detection job runs plan-only across a fixed stack matrix on a daily cr
 The state-backup and rabbitmq-backup jobs are scheduled shell/AWS sync pipelines
 (not Terraform apply). See Sections 5.7-5.9.
 
-The shared helper `jenkins/shared/terraform_common.groovy` provides `runQualityGatesPreInit`,
+The shared helper `Jenkins/shared/terraform_common.groovy` provides `runQualityGatesPreInit`,
 `runQualityGatesPostInit`, `tfInit`, `tfPlan`, `policyCheck`, `snapshotStateBeforeApply`,
 `tfApply`, `approvalGate`, and `archivePlanArtifacts`.
 
@@ -171,7 +171,7 @@ drift-detection, terraform-state-backup, and terraform-rabbitmq-backup.
 | Repository URL | `https://git.example.com/example-org/platform-terraform-aws.git` |
 | Credentials | `git-grafana` |
 | Branch Specifier | `*/main` (or your default branch) |
-| Script Path | `jenkins/Jenkinsfile.rds` ← change per job |
+| Script Path | `Jenkins/Jenkinsfile.rds` ← change per job |
 | Lightweight checkout | ✅ tick |
 
 Click **Save**.
@@ -183,7 +183,7 @@ Click **Save**.
 > **Why here and not in the Jenkinsfile?**
 > For most jobs, `choice()` and `booleanParam()` can be defined inside the Jenkinsfile;
 > Jenkins picks them up automatically on the first run.
-> **The ECS job is different:** any `parameters {}` block in `jenkins/Jenkinsfile.ecs`
+> **The ECS job is different:** any `parameters {}` block in `Jenkins/Jenkinsfile.ecs`
 > causes Jenkins to re-sync parameters on every run, which overwrites Active Choices UI
 > settings (`APP_NAME`, `SERVICE_NAME`) back to plain String parameters.
 > **All `terraform-ecs` parameters must therefore be configured in the Jenkins UI only.**
@@ -345,7 +345,7 @@ No Active Choices parameters needed. The Jenkinsfile defines everything:
 `prod`), `RUN_APPLY` (boolean, default false).
 
 Before enabling apply, set `APPROVERS` at the top of
-`jenkins/Jenkinsfile.alb` to a comma-separated list of Jenkins user IDs.
+`Jenkins/Jenkinsfile.alb` to a comma-separated list of Jenkins user IDs.
 
 **Nothing extra to add in Jenkins UI.**
 
@@ -358,7 +358,7 @@ No Active Choices parameters needed. The Jenkinsfile defines everything:
 `prod`), `RUN_APPLY` (boolean, default false).
 
 Before enabling apply, set `APPROVERS` at the top of
-`jenkins/Jenkinsfile.vpc` to a comma-separated list of Jenkins user IDs.
+`Jenkins/Jenkinsfile.vpc` to a comma-separated list of Jenkins user IDs.
 
 **Nothing extra to add in Jenkins UI.**
 
@@ -368,7 +368,7 @@ Before enabling apply, set `APPROVERS` at the top of
 
 | Field | Value |
 |---|---|
-| Script Path | `jenkins/Jenkinsfile.drift-detection` |
+| Script Path | `Jenkins/Jenkinsfile.drift-detection` |
 | Build Triggers | Cron is defined in-pipeline (`H 2 * * *` daily); no UI trigger needed |
 | Parameters | `GIT_REPO_URL`, `GIT_BRANCH` (defined in Jenkinsfile) |
 
@@ -386,7 +386,7 @@ Review the `drift_report.txt` artifact after each run.
 `20-platform` (12), `00-network` (4).
 
 The matrix is **discovered at runtime**, not hand-listed: `discoverStacks()` in
-`jenkins/Jenkinsfile.drift-detection` treats every directory containing a
+`Jenkins/Jenkinsfile.drift-detection` treats every directory containing a
 `backend.tf` as in scope. The previous hardcoded list had fallen 58 workspaces
 behind — every ECS service and frontend was silently unmonitored, which is where
 config drifts most, since image tags and task definitions change on every deploy.
@@ -407,7 +407,7 @@ does not land entirely in one lane. Bounded rather than fully parallel to avoid
 
 | Field | Value |
 |---|---|
-| Script Path | `jenkins/Jenkinsfile.terraform-state-backup` |
+| Script Path | `Jenkins/Jenkinsfile.terraform-state-backup` |
 | Build Triggers | Cron in-pipeline: `0 3 * * *` (daily 03:00 UTC) |
 | Parameters | None (no `parameters {}` block) |
 
@@ -433,7 +433,7 @@ This job can also be run manually from the Jenkins UI (Build Now).
 
 | Field | Value |
 |---|---|
-| Script Path | `jenkins/Jenkinsfile.rabbitmq-backup` |
+| Script Path | `Jenkins/Jenkinsfile.rabbitmq-backup` |
 | Build Triggers | Cron in-pipeline: `0 2 * * *` (daily 02:00 UTC) |
 | Parameters | None (reachability for hera is probed at runtime) |
 

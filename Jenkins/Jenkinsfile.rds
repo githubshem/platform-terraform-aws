@@ -1,15 +1,14 @@
 /**
- * Jenkinsfile.redis
+ * Jenkinsfile.rds
  *
- * Jenkins Declarative Pipeline - Terraform Redis (ElastiCache)
+ * Jenkins Declarative Pipeline - Terraform RDS
  *
  * Supported resource path:
- *   Terraform/10-data/elasticache/environments/{env}/{cluster}/
+ *   Terraform/10-data/aurora-mysql/environments/{env}/{cluster}/
  *
- * Cluster names vary by environment:
- *   test → selene | hera | persephone | gaia
- *   prod    → selene | hera | persephone |
- *                gaia
+ * Available clusters (same for test and prod):
+ *   selene | athena | persephone |
+ *   gaia | horae
  */
 
 pipeline {
@@ -63,23 +62,9 @@ pipeline {
         stage('Resolve Terraform Path') {
             steps {
                 script {
-                    def clustersByEnv = [
-                        'test': [
-                            'selene',
-                            'hera',
-                            'persephone',
-                            'gaia'
-                        ],
-                        prod: [
-                            'selene',
-                            'hera',
-                            'persephone',
-                            'gaia'
-                        ]
-                    ]
-
-                    if (!clustersByEnv.containsKey(params.TERRAFORM_ENV)) {
-                        error("Invalid TERRAFORM_ENV '${params.TERRAFORM_ENV}'. Allowed: ${clustersByEnv.keySet().join(', ')}")
+                    def allowedEnvs = ['test', 'prod']
+                    if (!(params.TERRAFORM_ENV in allowedEnvs)) {
+                        error("Invalid TERRAFORM_ENV '${params.TERRAFORM_ENV}'. Allowed: ${allowedEnvs.join(', ')}")
                     }
 
                     def selectedCluster = params.CLUSTER_NAME?.trim()
@@ -87,13 +72,21 @@ pipeline {
                         error("CLUSTER_NAME is required.")
                     }
 
-                    def allowedClusters = clustersByEnv[params.TERRAFORM_ENV]
+                    def allowedClusters = [
+                        'selene',
+                        'athena',
+                        'persephone',
+                        'gaia',
+                        'horae'
+                    ]
+
                     if (!(selectedCluster in allowedClusters)) {
-                        error("Invalid CLUSTER_NAME '${selectedCluster}' for env '${params.TERRAFORM_ENV}'. Allowed: ${allowedClusters.join(', ')}")
+                        error("Invalid CLUSTER_NAME '${selectedCluster}'. Allowed: ${allowedClusters.join(', ')}")
                     }
 
                     env.BASE_PATH = [
-                        "Terraform/10-data/elasticache/environments",
+                        "Terraform/10-data/aurora-mysql",
+                        "environments",
                         params.TERRAFORM_ENV,
                         selectedCluster
                     ].join('/')
@@ -106,7 +99,7 @@ pipeline {
         stage('Quality Gates (pre-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPreInit(env.BASE_PATH)
                 }
             }
@@ -115,7 +108,7 @@ pipeline {
         stage('Terraform Init') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -124,7 +117,7 @@ pipeline {
         stage('Quality Gates (post-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -133,14 +126,14 @@ pipeline {
         stage('Terraform Plan') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
             post {
                 always {
                     script {
-                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        def tf = load 'Jenkins/shared/terraform_common.groovy'
                         tf.archivePlanArtifacts(env.BASE_PATH)
                     }
                 }
@@ -150,7 +143,7 @@ pipeline {
         stage('Policy Check') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.policyCheck(env.BASE_PATH)
                 }
             }
@@ -162,9 +155,9 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.approvalGate(
-                        "Review the Redis plan for cluster '${params.CLUSTER_NAME}' " +
+                        "Review the RDS plan for cluster '${params.CLUSTER_NAME}' " +
                         "(env: ${params.TERRAFORM_ENV}). Check plan_summary.txt before approving.",
                         30
                     )
@@ -178,7 +171,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
                 }
             }
@@ -190,7 +183,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -200,13 +193,13 @@ pipeline {
 
     post {
         success {
-            echo "✅ Redis pipeline completed for ${params.CLUSTER_NAME} (${params.TERRAFORM_ENV})"
+            echo "✅ RDS pipeline completed for ${params.CLUSTER_NAME} (${params.TERRAFORM_ENV})"
         }
         failure {
-            echo "❌ Redis pipeline failed for ${params.CLUSTER_NAME} (${params.TERRAFORM_ENV})"
+            echo "❌ RDS pipeline failed for ${params.CLUSTER_NAME} (${params.TERRAFORM_ENV})"
         }
         aborted {
-            echo "⏹ Redis pipeline aborted - Apply was not executed."
+            echo "⏹ RDS pipeline aborted - Apply was not executed."
         }
     }
 }

@@ -5,7 +5,7 @@
  * Classifies each stack as: NO DRIFT | DRIFT DETECTED | PLAN FAILED | PROVIDER/BACKEND ISSUE
  *
  * Jenkins job setup:
- *   Script Path: jenkins/Jenkinsfile.drift-detection
+ *   Script Path: Jenkins/Jenkinsfile.drift-detection
  *   Build Triggers: cron is defined in-pipeline (daily off-hours)
  */
 
@@ -110,7 +110,7 @@ pipeline {
         stage('Drift Detection') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     def stacks = discoverStacks()
                     echo "Drift matrix: ${stacks.size()} workspaces discovered"
 

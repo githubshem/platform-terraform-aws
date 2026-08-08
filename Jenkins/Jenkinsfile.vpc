@@ -1,15 +1,17 @@
 /**
- * Jenkinsfile.rds
+ * Jenkinsfile.vpc
  *
- * Jenkins Declarative Pipeline - Terraform RDS
+ * Jenkins Declarative Pipeline - Terraform VPC + security groups
  *
  * Supported resource path:
- *   Terraform/10-data/aurora-mysql/environments/{env}/{cluster}/
+ *   Terraform/00-network/{stack}/environments/{env}/
  *
- * Available clusters (same for test and prod):
- *   selene | athena | persephone |
- *   gaia | horae
+ * Stacks: vpc | security-groups
+ *
+ * Apply requires RUN_APPLY=true and approval from a named approver (see APPROVERS).
  */
+
+def APPROVERS = 'approver1,approver2,approver3'  // Comma-separated Jenkins user IDs
 
 pipeline {
     agent any
@@ -26,6 +28,11 @@ pipeline {
             description: 'Branch to check out'
         )
         choice(
+            name: 'VPC_STACK',
+            choices: ['vpc', 'security-groups'],
+            description: 'VPC stack to plan'
+        )
+        choice(
             name: 'TERRAFORM_ENV',
             choices: ['test', 'prod'],
             description: 'Target environment'
@@ -33,7 +40,7 @@ pipeline {
         booleanParam(
             name: 'RUN_APPLY',
             defaultValue: false,
-            description: 'Tick to enable Approval Gate + Apply (leave unticked for plan-only runs)'
+            description: 'Tick to enable Policy Check + Approval Gate + Apply'
         )
     }
 
@@ -62,33 +69,21 @@ pipeline {
         stage('Resolve Terraform Path') {
             steps {
                 script {
+                    def allowedStacks = ['vpc', 'security-groups']
+                    if (!(params.VPC_STACK in allowedStacks)) {
+                        error("Invalid VPC_STACK '${params.VPC_STACK}'. Allowed: ${allowedStacks.join(', ')}")
+                    }
+
                     def allowedEnvs = ['test', 'prod']
                     if (!(params.TERRAFORM_ENV in allowedEnvs)) {
                         error("Invalid TERRAFORM_ENV '${params.TERRAFORM_ENV}'. Allowed: ${allowedEnvs.join(', ')}")
                     }
 
-                    def selectedCluster = params.CLUSTER_NAME?.trim()
-                    if (!selectedCluster) {
-                        error("CLUSTER_NAME is required.")
-                    }
-
-                    def allowedClusters = [
-                        'selene',
-                        'athena',
-                        'persephone',
-                        'gaia',
-                        'horae'
-                    ]
-
-                    if (!(selectedCluster in allowedClusters)) {
-                        error("Invalid CLUSTER_NAME '${selectedCluster}'. Allowed: ${allowedClusters.join(', ')}")
-                    }
-
                     env.BASE_PATH = [
-                        "Terraform/10-data/aurora-mysql",
+                        "Terraform/00-network",
+                        params.VPC_STACK,
                         "environments",
-                        params.TERRAFORM_ENV,
-                        selectedCluster
+                        params.TERRAFORM_ENV
                     ].join('/')
 
                     echo "Resolved BASE_PATH: ${env.BASE_PATH}"
@@ -99,7 +94,7 @@ pipeline {
         stage('Quality Gates (pre-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPreInit(env.BASE_PATH)
                 }
             }
@@ -108,7 +103,7 @@ pipeline {
         stage('Terraform Init') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -117,7 +112,7 @@ pipeline {
         stage('Quality Gates (post-init)') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.runQualityGatesPostInit(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -126,14 +121,14 @@ pipeline {
         stage('Terraform Plan') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfPlan(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
             post {
                 always {
                     script {
-                        def tf = load 'jenkins/shared/terraform_common.groovy'
+                        def tf = load 'Jenkins/shared/terraform_common.groovy'
                         tf.archivePlanArtifacts(env.BASE_PATH)
                     }
                 }
@@ -143,8 +138,8 @@ pipeline {
         stage('Policy Check') {
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
-                    tf.policyCheck(env.BASE_PATH)
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
+                    env.DESTRUCTIVE_ACTIONS = tf.policyCheck(env.BASE_PATH).join('\n')
                 }
             }
         }
@@ -155,11 +150,14 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
+                    def policyNote = env.DESTRUCTIVE_ACTIONS?.trim() ?
+                        "\n⚠️  DESTRUCTIVE ACTIONS IN PLAN:\n${env.DESTRUCTIVE_ACTIONS}" : ''
                     tf.approvalGate(
-                        "Review the RDS plan for cluster '${params.CLUSTER_NAME}' " +
-                        "(env: ${params.TERRAFORM_ENV}). Check plan_summary.txt before approving.",
-                        30
+                        "Review the VPC plan for ${params.VPC_STACK} (env: ${params.TERRAFORM_ENV}).${policyNote}\n" +
+                        "Check plan_summary.txt artifact before approving.",
+                        30,
+                        APPROVERS
                     )
                 }
             }
@@ -171,7 +169,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.snapshotStateBeforeApply(env.BASE_PATH, "${env.BUILD_NUMBER}", env.AWS_CRED_ID)
                 }
             }
@@ -183,7 +181,7 @@ pipeline {
             }
             steps {
                 script {
-                    def tf = load 'jenkins/shared/terraform_common.groovy'
+                    def tf = load 'Jenkins/shared/terraform_common.groovy'
                     tf.tfApply(env.BASE_PATH, env.AWS_CRED_ID)
                 }
             }
@@ -193,13 +191,13 @@ pipeline {
 
     post {
         success {
-            echo "✅ RDS pipeline completed for ${params.CLUSTER_NAME} (${params.TERRAFORM_ENV})"
+            echo "✅ VPC pipeline completed for ${params.VPC_STACK} (${params.TERRAFORM_ENV})"
         }
         failure {
-            echo "❌ RDS pipeline failed for ${params.CLUSTER_NAME} (${params.TERRAFORM_ENV})"
+            echo "❌ VPC pipeline failed for ${params.VPC_STACK} (${params.TERRAFORM_ENV})"
         }
         aborted {
-            echo "⏹ RDS pipeline aborted - Apply was not executed."
+            echo "⏹ VPC pipeline aborted - Apply was not executed."
         }
     }
 }

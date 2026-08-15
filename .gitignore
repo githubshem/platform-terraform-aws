@@ -1,13 +1,39 @@
 # Ignore a specific file
 secrets.txt
 
+# Local environment files and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+
 # Terraform local state and plugin cache (do NOT ignore .terraform.lock.hcl)
 .terraform/
 *.tfstate*
 *.tfstate.backup
+*.tfplan
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
 
 # Ignore a whole directory (folders must end with /)
 .cursor/
+.claude/
 node_modules/
 bin/
 .tools/
